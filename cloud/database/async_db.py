@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import asyncpg
-from contextlib import asynccontextmanager
-from typing import Optional, Dict, Any, List
-
-import config
 import logging
+from contextlib import asynccontextmanager
+from typing import Any, Dict, List, Optional
+
+import asyncpg
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +29,7 @@ async def init_db_async() -> None:
         await conn.execute("SET TIME ZONE 'UTC';")
 
         # Создаем таблицы, если их нет
-        await conn.execute(
-            """
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGSERIAL PRIMARY KEY,
                 telegram_id BIGINT UNIQUE NOT NULL,
@@ -43,11 +42,9 @@ async def init_db_async() -> None:
                 last_activity TIMESTAMP NULL,
                 consultation_count INTEGER NOT NULL DEFAULT 0
             );
-            """
-        )
+            """)
 
-        await conn.execute(
-            """
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS dialogs (
                 dialog_id BIGSERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -57,11 +54,9 @@ async def init_db_async() -> None:
                 llm_model_used VARCHAR(50),
                 total_tokens_used INTEGER NOT NULL DEFAULT 0
             );
-            """
-        )
+            """)
 
-        await conn.execute(
-            """
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 message_id BIGSERIAL PRIMARY KEY,
                 dialog_id BIGINT NOT NULL REFERENCES dialogs(dialog_id) ON DELETE CASCADE,
@@ -72,8 +67,7 @@ async def init_db_async() -> None:
                 telegram_message_id BIGINT,
                 tokens_used INTEGER NOT NULL DEFAULT 0
             );
-            """
-        )
+            """)
 
     logger.info("asyncpg: пул соединений создан, таблицы проверены")
 
@@ -143,7 +137,9 @@ async def ensure_senior_or_admin(telegram_id: int) -> Optional[Dict[str, Any]]:
     return user
 
 
-async def create_or_get_active_dialog(user_id: int, llm_model_used: str = "gpt-4") -> Dict[str, Any]:
+async def create_or_get_active_dialog(
+    user_id: int, llm_model_used: str = "gpt-4"
+) -> Dict[str, Any]:
     """
     Получить активный диалог пользователя или создать новый.
     """
@@ -200,7 +196,9 @@ async def save_message(
         return dict(row)
 
 
-async def update_user_stats(user_id: int, last_activity, increment_consultation: bool = False) -> None:
+async def update_user_stats(
+    user_id: int, last_activity, increment_consultation: bool = False
+) -> None:
     """
     Обновление статистики пользователя.
     """
@@ -247,17 +245,17 @@ async def add_tokens_to_dialog(dialog_id: int, tokens_used: int) -> None:
 async def update_user_role(telegram_id: int, role: str) -> bool:
     """
     Обновить роль пользователя
-    
+
     Args:
         telegram_id: Telegram ID пользователя
         role: Новая роль (junior, senior, admin)
-    
+
     Returns:
         True если успешно обновлено
     """
     if role not in ("junior", "senior", "admin"):
         return False
-    
+
     async with get_conn() as conn:
         result = await conn.execute(
             """
@@ -274,11 +272,11 @@ async def update_user_role(telegram_id: int, role: str) -> bool:
 async def toggle_user_block(telegram_id: int, is_blocked: bool) -> bool:
     """
     Заблокировать/разблокировать пользователя
-    
+
     Args:
         telegram_id: Telegram ID пользователя
         is_blocked: True для блокировки, False для разблокировки
-    
+
     Returns:
         True если успешно обновлено
     """
@@ -298,10 +296,10 @@ async def toggle_user_block(telegram_id: int, is_blocked: bool) -> bool:
 async def get_all_users(limit: int = 100) -> List[Dict[str, Any]]:
     """
     Получить список всех пользователей
-    
+
     Args:
         limit: Максимальное количество пользователей
-    
+
     Returns:
         Список пользователей
     """
@@ -322,16 +320,16 @@ async def get_all_users(limit: int = 100) -> List[Dict[str, Any]]:
 async def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
     """
     Получить пользователя по username
-    
+
     Args:
         username: Username пользователя (без @)
-    
+
     Returns:
         Словарь с данными пользователя или None
     """
     # Убираем @ если есть
-    username = username.lstrip('@')
-    
+    username = username.lstrip("@")
+
     async with get_conn() as conn:
         row = await conn.fetchrow(
             """
@@ -343,5 +341,3 @@ async def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
             username,
         )
         return dict(row) if row else None
-
-
