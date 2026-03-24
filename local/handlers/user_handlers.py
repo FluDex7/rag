@@ -1,30 +1,34 @@
-from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+import asyncio
+import logging
+from datetime import datetime
+
+import config
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-import logging
-import asyncio
-from pathlib import Path
-from datetime import datetime, timezone
-
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from database.async_db import (
-    get_or_create_user,
+    add_tokens_to_dialog,
+    create_or_get_active_dialog,
     ensure_senior_or_admin,
+    get_all_users,
+    get_or_create_user,
     get_user_by_telegram_id,
     get_user_by_username,
-    create_or_get_active_dialog,
     save_message,
-    update_user_stats,
-    add_tokens_to_dialog,
-    update_user_role,
     toggle_user_block,
-    get_all_users,
+    update_user_role,
+    update_user_stats,
 )
-from services.rag_service import RAGService
-from services.qdrant_service import QdrantService
 from services.pdf_processor import process_pdf_and_upload_to_qdrant
-import config
+from services.qdrant_service import QdrantService
+from services.rag_service import RAGService
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +39,14 @@ qdrant_service = QdrantService()
 
 class AddQAStates(StatesGroup):
     """Состояния для добавления Q&A"""
+
     waiting_question = State()
     waiting_answer = State()
 
 
 class AdminStates(StatesGroup):
     """Состояния для админ-панели"""
+
     waiting_pdf = State()
     waiting_user_selection_method = State()
     waiting_telegram_id_for_role = State()
@@ -54,7 +60,6 @@ class AdminStates(StatesGroup):
 async def cmd_start(message: Message):
     """Обработчик команды /start"""
     try:
-        # Создаем или обновляем пользователя
         user = await get_or_create_user(
             telegram_id=message.from_user.id,
             username=message.from_user.username,
@@ -62,11 +67,12 @@ async def cmd_start(message: Message):
             or f"{message.from_user.first_name} {message.from_user.last_name or ''}".strip(),
         )
 
-        # Обновляем last_activity
-        await update_user_stats(user_id=user["user_id"], last_activity=datetime.utcnow())
+        await update_user_stats(
+            user_id=user["user_id"], last_activity=datetime.utcnow()
+        )
 
-        # Приветственное сообщение
-        welcome_text = """👋 Добро пожаловать в бота-консультанта по Налоговому кодексу РФ!
+        welcome_text = f"""👋 Добро пожаловать в бота-консультанта по Налоговому кодексу РФ!
+(🏠 ЛОКАЛЬНАЯ ВЕРСИЯ - {config.OLLAMA_MODEL} + {config.LOCAL_EMBEDDING_MODEL})
 
 Я помогу вам найти ответы на вопросы по налоговому законодательству, в частности по 16 главе НК РФ.
 
@@ -78,10 +84,12 @@ async def cmd_start(message: Message):
 /help - справка
 
 Задайте ваш вопрос:"""
-        
+
         await message.answer(welcome_text)
-        logger.info(f"Пользователь {message.from_user.id} запустил бота")
-        
+        logger.info(
+            f"Пользователь {message.from_user.id} запустил бота (локальная версия)"
+        )
+
     except Exception as e:
         logger.error(f"Ошибка в cmd_start: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
@@ -90,9 +98,13 @@ async def cmd_start(message: Message):
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     """Обработчик команды /help"""
-    help_text = """📚 Справка по боту
+    help_text = f"""📚 Справка по боту (локальная версия)
 
 Я - бот-консультант по Налоговому кодексу РФ. Я могу помочь вам найти ответы на вопросы по налоговому законодательству.
+
+🤖 Используемые модели:
+• Embeddings: {config.LOCAL_EMBEDDING_MODEL}
+• LLM: {config.OLLAMA_MODEL} через Ollama
 
 Как использовать:
 1. Просто напишите ваш вопрос текстом
@@ -108,7 +120,7 @@ async def cmd_help(message: Message):
 • Какие штрафы предусмотрены за нарушение порядка постановки на учет?
 • Что такое налоговое правонарушение?
 • Какая ответственность за неуплату налогов?"""
-    
+
     await message.answer(help_text)
 
 
@@ -122,7 +134,6 @@ async def cmd_add_qa(message: Message, state: FSMContext):
             await message.answer("Сначала используйте команду /start")
             return
 
-        # Проверяем права (только senior и admin)
         if user["role"] not in ("senior", "admin"):
             await message.answer(
                 "❌ У вас нет прав для добавления Q&A. Эта функция доступна только для senior и admin."
@@ -133,20 +144,18 @@ async def cmd_add_qa(message: Message, state: FSMContext):
             await message.answer("❌ Ваш аккаунт заблокирован.")
             return
 
-        # Переходим в состояние ожидания вопроса
         await state.set_state(AddQAStates.waiting_question)
         await message.answer(
-            "📝 Добавление нового Q&A в базу знаний.\n\n"
-            "Введите вопрос:"
+            "📝 Добавление нового Q&A в базу знаний.\n\n" "Введите вопрос:"
         )
-        
+
     except Exception as e:
         logger.error(f"Ошибка в cmd_add_qa: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
 
 
 @router.message(AddQAStates.waiting_question)
-async def process_question(message: Message, state: FSMContext):
+async def process_qa_question(message: Message, state: FSMContext):
     """Обработка вопроса для Q&A"""
     await state.update_data(question=message.text)
     await state.set_state(AddQAStates.waiting_answer)
@@ -154,19 +163,18 @@ async def process_question(message: Message, state: FSMContext):
 
 
 @router.message(AddQAStates.waiting_answer)
-async def process_answer(message: Message, state: FSMContext):
+async def process_qa_answer(message: Message, state: FSMContext):
     """Обработка ответа для Q&A и сохранение в Qdrant"""
     try:
         data = await state.get_data()
         question = data.get("question")
         answer = message.text
-        
+
         if not question:
             await message.answer("Ошибка: вопрос не найден. Начните заново с /add_qa")
             await state.clear()
             return
-        
-        # Получаем информацию о пользователе
+
         user = await get_user_by_telegram_id(message.from_user.id)
         if not user:
             await message.answer("Сначала используйте команду /start")
@@ -174,39 +182,41 @@ async def process_answer(message: Message, state: FSMContext):
             return
 
         added_by = f"{user.get('username') or user.get('full_name')} (ID: {user.get('telegram_id')})"
-        
-        # Добавляем в Qdrant
+
         success = qdrant_service.add_qa(question, answer, added_by)
-        
+
         if success:
             await message.answer(
                 f"✅ Q&A успешно добавлено в базу знаний!\n\n"
                 f"Вопрос: {question}\n"
                 f"Ответ: {answer[:200]}..."
             )
-            logger.info(f"Пользователь {message.from_user.id} добавил Q&A: {question[:50]}...")
+            logger.info(
+                f"Пользователь {message.from_user.id} добавил Q&A: {question[:50]}..."
+            )
         else:
-            await message.answer("❌ Произошла ошибка при добавлении Q&A. Попробуйте позже.")
-        
+            await message.answer(
+                "❌ Произошла ошибка при добавлении Q&A. Попробуйте позже."
+            )
+
         await state.clear()
-        
+
     except Exception as e:
         logger.error(f"Ошибка при добавлении Q&A: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
         await state.clear()
 
 
-@router.message(F.text & ~F.text.startswith('/'))
+@router.message(F.text & ~F.text.startswith("/"))
 async def process_question(message: Message):
     """Обработка текстовых вопросов пользователей"""
     try:
         question = message.text.strip()
-        
+
         if not question:
             await message.answer("Пожалуйста, задайте вопрос.")
             return
-        
-        # Проверяем пользователя
+
         user = await get_user_by_telegram_id(message.from_user.id)
 
         if not user:
@@ -217,10 +227,10 @@ async def process_question(message: Message):
             await message.answer("❌ Ваш аккаунт заблокирован.")
             return
 
-        # Создаем или получаем активный диалог
-        dialog = await create_or_get_active_dialog(user_id=user["user_id"], llm_model_used="gpt-4")
+        dialog = await create_or_get_active_dialog(
+            user_id=user["user_id"], llm_model_used=config.OLLAMA_MODEL
+        )
 
-        # Сохраняем сообщение пользователя
         await save_message(
             dialog_id=dialog["dialog_id"],
             user_id=user["user_id"],
@@ -228,31 +238,23 @@ async def process_question(message: Message):
             sender_type="user",
             telegram_message_id=message.message_id,
         )
-        
-        # Отправляем индикатор печати
+
         await message.bot.send_chat_action(message.chat.id, "typing")
-        
-        # Получаем ответ через RAG
-        logger.info(f"Обработка вопроса от пользователя {message.from_user.id}: {question[:50]}...")
+
+        logger.info(
+            f"Обработка вопроса от пользователя {message.from_user.id}: {question[:50]}..."
+        )
         answer, tokens_used, search_results = rag_service.get_answer(question)
-        
-        # Отправляем ответ
+
         sent_message = await message.answer(answer)
-        
-        # Сохраняем ответ бота в БД
-        # (получаем пользователя и диалог заново, чтобы использовать актуальные данные)
-        user_db = await get_user_by_telegram_id(message.from_user.id)
-        if not user_db:
-            logger.error(f"Пользователь {message.from_user.id} не найден в БД")
-            return
 
-        dialog_db = await create_or_get_active_dialog(user_id=user_db["user_id"], llm_model_used="gpt-4")
-
-        await add_tokens_to_dialog(dialog_id=dialog_db["dialog_id"], tokens_used=tokens_used)
+        await add_tokens_to_dialog(
+            dialog_id=dialog["dialog_id"], tokens_used=tokens_used
+        )
 
         await save_message(
-            dialog_id=dialog_db["dialog_id"],
-            user_id=user_db["user_id"],
+            dialog_id=dialog["dialog_id"],
+            user_id=user["user_id"],
             text=answer,
             sender_type="bot",
             telegram_message_id=sent_message.message_id,
@@ -260,16 +262,20 @@ async def process_question(message: Message):
         )
 
         await update_user_stats(
-            user_id=user_db["user_id"],
+            user_id=user["user_id"],
             last_activity=datetime.utcnow(),
             increment_consultation=True,
         )
-        
-        logger.info(f"Ответ отправлен пользователю {message.from_user.id}, использовано токенов: {tokens_used}")
-        
+
+        logger.info(
+            f"Ответ отправлен пользователю {message.from_user.id}, использовано токенов: {tokens_used}"
+        )
+
     except Exception as e:
         logger.error(f"Ошибка при обработке вопроса: {e}", exc_info=True)
-        await message.answer("Произошла ошибка при обработке вашего вопроса. Попробуйте позже.")
+        await message.answer(
+            "Произошла ошибка при обработке вашего вопроса. Попробуйте позже."
+        )
 
 
 @router.message(Command("admin"))
@@ -277,53 +283,51 @@ async def cmd_admin(message: Message, state: FSMContext):
     """Обработчик команды /admin - админ-панель"""
     try:
         user = await get_user_by_telegram_id(message.from_user.id)
-        
+
         if not user:
             await message.answer("Сначала используйте команду /start")
             return
-        
-        # Проверяем права (только admin)
+
         if user["role"] != "admin":
-            await message.answer("❌ У вас нет прав доступа к админ-панели. Эта функция доступна только для admin.")
+            await message.answer(
+                "❌ У вас нет прав доступа к админ-панели. Эта функция доступна только для admin."
+            )
             return
-        
+
         if user["is_blocked"]:
             await message.answer("❌ Ваш аккаунт заблокирован.")
             return
-        
-        # Очищаем состояние, если было ожидание файла
+
         current_state = await state.get_state()
         if current_state == AdminStates.waiting_pdf:
             await state.clear()
             await message.answer("✅ Состояние ожидания файла отменено.")
-        
-        # Создаем inline клавиатуру
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔄 Обновить знания",
-                    callback_data="admin_update_knowledge"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👥 Управление пользователями",
-                    callback_data="admin_users"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📊 Статистика",
-                    callback_data="admin_stats"
-                ),
-                InlineKeyboardButton(
-                    text="❌ Закрыть",
-                    callback_data="admin_close"
-                )
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🔄 Обновить знания",
+                        callback_data="admin_update_knowledge",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="👥 Управление пользователями", callback_data="admin_users"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="📊 Статистика", callback_data="admin_stats"
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Закрыть", callback_data="admin_close"
+                    ),
+                ],
             ]
-        ])
-        
-        admin_text = """🔐 Админ-панель
+        )
+
+        admin_text = """🔐 Админ-панель (локальная версия)
 
 Доступные действия:
 
@@ -331,56 +335,66 @@ async def cmd_admin(message: Message, state: FSMContext):
 • Удаляет все векторы из Qdrant
 • Парсит загруженный PDF файл
 • Разбивает на главы и статьи
-• Фильтрует статьи < 150 слов (16 глава)
-• Загружает в Qdrant
+• Загружает в Qdrant с локальными embeddings
 
 📊 Статистика
 • Показывает статистику системы
 
 Выберите действие:"""
-        
+
         await message.answer(admin_text, reply_markup=keyboard)
-        logger.info(f"Админ {message.from_user.id} открыл админ-панель")
-        
+        logger.info(
+            f"Админ {message.from_user.id} открыл админ-панель (локальная версия)"
+        )
+
     except Exception as e:
         logger.error(f"Ошибка в cmd_admin: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
+
+
+# Остальные обработчики (admin_update_knowledge, admin_stats, admin_users и т.д.)
+# аналогичны handlers/user_handlers.py, но используют локальные сервисы
+# Для краткости импортируем их из основного файла или дублируем при необходимости
 
 
 @router.callback_query(F.data == "admin_update_knowledge")
 async def callback_update_knowledge(callback: CallbackQuery, state: FSMContext):
     """Обработчик кнопки 'Обновить знания'"""
     try:
-        # Проверяем права
         user = await get_user_by_telegram_id(callback.from_user.id)
         if not user or user["role"] != "admin":
             await callback.answer("❌ Нет прав доступа", show_alert=True)
             return
-        
+
         await callback.answer()
-        
-        # Переводим в состояние ожидания PDF файла
+
         await state.set_state(AdminStates.waiting_pdf)
-        
-        # Создаем клавиатуру для отмены
-        cancel_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отменить", callback_data="admin_cancel_update")]
-        ])
-        
+
+        cancel_keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="❌ Отменить", callback_data="admin_cancel_update"
+                    )
+                ]
+            ]
+        )
+
         await callback.message.answer(
             "📄 Отправьте PDF файл для обновления знаний.\n\n"
             "Файл будет сохранен и обработан:\n"
             "• Удаление всех векторов из Qdrant\n"
             "• Парсинг PDF\n"
             "• Разбивка на главы и статьи\n"
-            "• Фильтрация статей < 150 слов (16 глава)\n"
-            "• Загрузка в Qdrant\n\n"
+            "• Загрузка в Qdrant с локальными embeddings\n\n"
             "Процесс может занять несколько минут.",
-            reply_markup=cancel_keyboard
+            reply_markup=cancel_keyboard,
         )
-        
-        logger.info(f"Админ {callback.from_user.id} начал процесс обновления знаний")
-        
+
+        logger.info(
+            f"Админ {callback.from_user.id} начал процесс обновления знаний (локальная версия)"
+        )
+
     except Exception as e:
         logger.error(f"Ошибка в callback_update_knowledge: {e}")
         await callback.message.answer("Произошла ошибка. Попробуйте позже.")
@@ -390,84 +404,69 @@ async def callback_update_knowledge(callback: CallbackQuery, state: FSMContext):
 async def process_pdf_file(message: Message, state: FSMContext):
     """Обработка загруженного PDF файла"""
     try:
-        # Проверяем права
         user = await get_user_by_telegram_id(message.from_user.id)
         if not user or user["role"] != "admin":
             await message.answer("❌ У вас нет прав доступа.")
             await state.clear()
             return
-        
-        # Проверяем, что это PDF файл
+
         document = message.document
         if not document:
             await message.answer("❌ Файл не найден. Отправьте PDF файл.")
             return
-        
-        # Проверяем расширение
+
         file_name = document.file_name or "document"
-        if not file_name.lower().endswith('.pdf'):
+        if not file_name.lower().endswith(".pdf"):
             await message.answer("❌ Файл должен быть в формате PDF (.pdf)")
             return
-        
-        # Создаем папку files/ если её нет
+
         files_dir = Path("files")
         files_dir.mkdir(exist_ok=True)
-        
-        # Генерируем уникальное имя файла с временной меткой
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_name = Path(file_name).stem
         unique_filename = f"{base_name}_{timestamp}.pdf"
         file_path = files_dir / unique_filename
-        
-        # Отправляем сообщение о начале загрузки
+
         status_msg = await message.answer(
             f"📥 Загружаю файл: {file_name}\n"
             f"💾 Сохраняю как: {unique_filename}\n\n"
             f"⏳ Пожалуйста, подождите..."
         )
-        
-        # Скачиваем файл
+
         file = await message.bot.get_file(document.file_id)
         await message.bot.download_file(file.file_path, destination=str(file_path))
-        
+
         await status_msg.edit_text(
             f"✅ Файл сохранен: {unique_filename}\n\n"
             f"🔄 Начинаю обработку...\n"
             f"Это может занять несколько минут."
         )
-        
-        # Очищаем коллекцию
+
         await message.bot.send_chat_action(message.chat.id, "typing")
         cleared = qdrant_service.clear_collection()
-        
+
         if not cleared:
             await status_msg.edit_text("❌ Ошибка при очистке коллекции Qdrant")
             await state.clear()
             return
-        
-        # Обрабатываем PDF в отдельной задаче, чтобы не блокировать бота
+
         loop = asyncio.get_event_loop()
         success, result_message = await loop.run_in_executor(
-            None,
-            process_pdf_and_upload_to_qdrant,
-            str(file_path),
-            None,  # chapter_filter - загружаем ВСЕ главы
-            None  # max_words - без ограничения по размеру
+            None, process_pdf_and_upload_to_qdrant, str(file_path), None, None
         )
-        
-        # Обновляем сообщение с результатом
+
         await status_msg.edit_text(result_message)
-        
-        # Очищаем состояние
+
         await state.clear()
-        
-        logger.info(f"Админ {message.from_user.id} обновил знания из файла {unique_filename}. Успех: {success}")
-        
+
+        logger.info(
+            f"Админ {message.from_user.id} обновил знания из файла {unique_filename}. Успех: {success}"
+        )
+
     except Exception as e:
         logger.error(f"Ошибка при обработке PDF файла: {e}", exc_info=True)
-        await message.answer(
-            f"❌ Произошла ошибка при обработке файла:\n{str(e)}"
-        )
+        await message.answer(f"❌ Произошла ошибка при обработке файла:\n{str(e)}")
         await state.clear()
 
 
@@ -488,29 +487,32 @@ async def callback_admin_stats(callback: CallbackQuery):
         if not user or user["role"] != "admin":
             await callback.answer("❌ Нет прав доступа", show_alert=True)
             return
-        
-        # Получаем информацию о коллекции
+
         try:
-            collection_info = qdrant_service.client.get_collection(qdrant_service.collection_name)
+            collection_info = qdrant_service.client.get_collection(
+                qdrant_service.collection_name
+            )
             points_count = collection_info.points_count
-        except:
+        except Exception:
             points_count = "недоступно"
-        
-        stats_text = f"""📊 Статистика системы
+
+        stats_text = f"""📊 Статистика системы (локальная версия)
 
 🔍 Qdrant:
 • Коллекция: {qdrant_service.collection_name}
 • Векторов: {points_count}
 
 🤖 Бот:
-• Модель embeddings: {config.OPENAI_EMBEDDING_MODEL}
-• Модель LLM: {config.OPENAI_MODEL}
+• Модель embeddings: {config.LOCAL_EMBEDDING_MODEL}
+• Размерность: {config.EMBEDDING_DIMENSION}
+• Макс. токенов embeddings: {config.EMBEDDING_MAX_TOKENS}
+• Модель LLM: {config.OLLAMA_MODEL}
 • Макс. результатов поиска: {config.MAX_SEARCH_RESULTS}
 """
-        
+
         await callback.answer()
         await callback.message.answer(stats_text)
-        
+
     except Exception as e:
         logger.error(f"Ошибка при получении статистики: {e}")
         await callback.answer("❌ Ошибка при получении статистики", show_alert=True)
@@ -531,11 +533,11 @@ async def callback_cancel_update(callback: CallbackQuery, state: FSMContext):
         if not user or user["role"] != "admin":
             await callback.answer("❌ Нет прав доступа", show_alert=True)
             return
-        
+
         await state.clear()
         await callback.answer("❌ Обновление знаний отменено")
         await callback.message.edit_text("❌ Обновление знаний отменено.")
-        
+
     except Exception as e:
         logger.error(f"Ошибка при отмене обновления: {e}")
         await callback.answer("Ошибка", show_alert=True)
@@ -549,31 +551,26 @@ async def callback_admin_users(callback: CallbackQuery):
         if not user or user["role"] != "admin":
             await callback.answer("❌ Нет прав доступа", show_alert=True)
             return
-        
+
         await callback.answer()
-        
-        # Создаем клавиатуру управления пользователями
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="👤 Выдать роль",
-                    callback_data="admin_set_role"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🚫 Заблокировать пользователя",
-                    callback_data="admin_block_user"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад",
-                    callback_data="admin_back"
-                )
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="👤 Выдать роль", callback_data="admin_set_role"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🚫 Заблокировать пользователя",
+                        callback_data="admin_block_user",
+                    )
+                ],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")],
             ]
-        ])
-        
+        )
+
         users_text = """👥 Управление пользователями
 
 Доступные действия:
@@ -587,9 +584,9 @@ async def callback_admin_users(callback: CallbackQuery):
 • Поиск: по ID, username или из списка
 
 Выберите действие:"""
-        
+
         await callback.message.edit_text(users_text, reply_markup=keyboard)
-        
+
     except Exception as e:
         logger.error(f"Ошибка в callback_admin_users: {e}")
         await callback.answer("Ошибка", show_alert=True)
@@ -603,53 +600,44 @@ async def callback_set_role(callback: CallbackQuery, state: FSMContext):
         if not user or user["role"] != "admin":
             await callback.answer("❌ Нет прав доступа", show_alert=True)
             return
-        
+
         await callback.answer()
-        
-        # Переводим в состояние выбора способа поиска
+
         await state.set_state(AdminStates.waiting_user_selection_method)
         await state.update_data(action="set_role")
-        
-        # Создаем клавиатуру выбора способа поиска
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔢 По Telegram ID",
-                    callback_data="select_by_id_role"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👤 По username",
-                    callback_data="select_by_username_role"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📋 Выбрать из списка",
-                    callback_data="select_from_list_role"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад",
-                    callback_data="admin_users"
-                )
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🔢 По Telegram ID", callback_data="select_by_id_role"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="👤 По username", callback_data="select_by_username_role"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="📋 Выбрать из списка",
+                        callback_data="select_from_list_role",
+                    )
+                ],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_users")],
             ]
-        ])
-        
-        await callback.message.edit_text(
-            "👤 Выдача роли пользователю\n\n"
-            "Выберите способ поиска пользователя:",
-            reply_markup=keyboard
         )
-        
+
+        await callback.message.edit_text(
+            "👤 Выдача роли пользователю\n\n" "Выберите способ поиска пользователя:",
+            reply_markup=keyboard,
+        )
+
     except Exception as e:
         logger.error(f"Ошибка в callback_set_role: {e}")
         await callback.answer("Ошибка", show_alert=True)
 
 
-# Обработчики выбора способа поиска для роли
 @router.callback_query(F.data == "select_by_id_role")
 async def callback_select_by_id_role(callback: CallbackQuery, state: FSMContext):
     """Обработчик выбора поиска по ID для роли"""
@@ -679,58 +667,56 @@ async def callback_select_from_list_role(callback: CallbackQuery, state: FSMCont
     """Обработчик выбора из списка для роли"""
     try:
         await callback.answer()
-        
-        # Получаем список пользователей
+
         users = await get_all_users(limit=50)
-        
+
         if not users:
             await callback.message.edit_text("❌ Пользователи не найдены.")
             return
-        
-        # Создаем клавиатуру со списком пользователей
+
         keyboard_buttons = []
-        for user in users[:20]:  # Ограничиваем 20 пользователями
+        for user in users[:20]:
             username = user.get("username") or user.get("full_name") or "Без имени"
             telegram_id = user.get("telegram_id")
             role = user.get("role", "unknown")
             blocked = "🚫" if user.get("is_blocked") else "✅"
-            
+
             button_text = f"{blocked} {username} ({telegram_id}) - {role}"
             if len(button_text) > 60:
                 button_text = f"{blocked} {username[:20]}... ({telegram_id})"
-            
-            keyboard_buttons.append([
-                InlineKeyboardButton(
-                    text=button_text,
-                    callback_data=f"user_role_{telegram_id}"
-                )
-            ])
-        
-        keyboard_buttons.append([
-            InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_set_role")
-        ])
-        
+
+            keyboard_buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=button_text, callback_data=f"user_role_{telegram_id}"
+                    )
+                ]
+            )
+
+        keyboard_buttons.append(
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_set_role")]
+        )
+
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-        
+
         await callback.message.edit_text(
             f"📋 Выберите пользователя из списка:\n\n"
             f"Всего пользователей: {len(users)}\n"
             f"Показано: {min(20, len(users))}",
-            reply_markup=keyboard
+            reply_markup=keyboard,
         )
-        
+
     except Exception as e:
         logger.error(f"Ошибка при показе списка пользователей: {e}")
         await callback.answer("Ошибка", show_alert=True)
 
 
-@router.message(AdminStates.waiting_telegram_id_for_role, F.text.regexp(r'^\d+$'))
+@router.message(AdminStates.waiting_telegram_id_for_role, F.text.regexp(r"^\d+$"))
 async def process_telegram_id_for_role(message: Message, state: FSMContext):
     """Обработка Telegram ID для выдачи роли"""
     try:
         telegram_id = int(message.text.strip())
-        
-        # Проверяем, существует ли пользователь
+
         target_user = await get_user_by_telegram_id(telegram_id)
         if not target_user:
             await message.answer(
@@ -739,50 +725,36 @@ async def process_telegram_id_for_role(message: Message, state: FSMContext):
             )
             await state.clear()
             return
-        
-        # Сохраняем telegram_id в состоянии
-        await state.update_data(telegram_id=telegram_id, username=target_user.get("username") or target_user.get("full_name"))
-        
-        # Переводим в состояние выбора роли
+
+        await state.update_data(
+            telegram_id=telegram_id,
+            username=target_user.get("username") or target_user.get("full_name"),
+        )
+
         await state.set_state(AdminStates.waiting_role_selection)
-        
-        # Создаем клавиатуру выбора роли
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="👶 Junior",
-                    callback_data="role_junior"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👔 Senior",
-                    callback_data="role_senior"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👑 Admin",
-                    callback_data="role_admin"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="❌ Отменить",
-                    callback_data="admin_cancel_role"
-                )
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="👶 Junior", callback_data="role_junior")],
+                [InlineKeyboardButton(text="👔 Senior", callback_data="role_senior")],
+                [InlineKeyboardButton(text="👑 Admin", callback_data="role_admin")],
+                [
+                    InlineKeyboardButton(
+                        text="❌ Отменить", callback_data="admin_cancel_role"
+                    )
+                ],
             ]
-        ])
-        
+        )
+
         current_role = target_user.get("role", "unknown")
         await message.answer(
             f"👤 Пользователь: {target_user.get('username') or target_user.get('full_name') or 'Без имени'}\n"
             f"📱 Telegram ID: {telegram_id}\n"
             f"🎭 Текущая роль: {current_role}\n\n"
             f"Выберите новую роль:",
-            reply_markup=keyboard
+            reply_markup=keyboard,
         )
-        
+
     except ValueError:
         await message.answer("❌ Неверный формат. Введите число (Telegram ID).")
     except Exception as e:
@@ -804,9 +776,8 @@ async def process_invalid_telegram_id_for_role(message: Message):
 async def process_username_for_role(message: Message, state: FSMContext):
     """Обработка username для выдачи роли"""
     try:
-        username = message.text.strip().lstrip('@')
-        
-        # Проверяем, существует ли пользователь
+        username = message.text.strip().lstrip("@")
+
         target_user = await get_user_by_username(username)
         if not target_user:
             await message.answer(
@@ -815,52 +786,38 @@ async def process_username_for_role(message: Message, state: FSMContext):
             )
             await state.clear()
             return
-        
+
         telegram_id = target_user.get("telegram_id")
-        
-        # Сохраняем telegram_id в состоянии
-        await state.update_data(telegram_id=telegram_id, username=target_user.get("username") or target_user.get("full_name"))
-        
-        # Переводим в состояние выбора роли
+
+        await state.update_data(
+            telegram_id=telegram_id,
+            username=target_user.get("username") or target_user.get("full_name"),
+        )
+
         await state.set_state(AdminStates.waiting_role_selection)
-        
-        # Создаем клавиатуру выбора роли
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="👶 Junior",
-                    callback_data="role_junior"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👔 Senior",
-                    callback_data="role_senior"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👑 Admin",
-                    callback_data="role_admin"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="❌ Отменить",
-                    callback_data="admin_cancel_role"
-                )
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="👶 Junior", callback_data="role_junior")],
+                [InlineKeyboardButton(text="👔 Senior", callback_data="role_senior")],
+                [InlineKeyboardButton(text="👑 Admin", callback_data="role_admin")],
+                [
+                    InlineKeyboardButton(
+                        text="❌ Отменить", callback_data="admin_cancel_role"
+                    )
+                ],
             ]
-        ])
-        
+        )
+
         current_role = target_user.get("role", "unknown")
         await message.answer(
             f"👤 Пользователь: @{target_user.get('username') or 'Без username'}\n"
             f"📱 Telegram ID: {telegram_id}\n"
             f"🎭 Текущая роль: {current_role}\n\n"
             f"Выберите новую роль:",
-            reply_markup=keyboard
+            reply_markup=keyboard,
         )
-        
+
     except Exception as e:
         logger.error(f"Ошибка при обработке username для роли: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
@@ -875,50 +832,34 @@ async def callback_user_selected_for_role(callback: CallbackQuery, state: FSMCon
         if not user or user["role"] != "admin":
             await callback.answer("❌ Нет прав доступа", show_alert=True)
             return
-        
-        # Извлекаем telegram_id из callback_data
+
         telegram_id = int(callback.data.replace("user_role_", ""))
-        
-        # Получаем пользователя
+
         target_user = await get_user_by_telegram_id(telegram_id)
         if not target_user:
             await callback.answer("❌ Пользователь не найден", show_alert=True)
             return
-        
-        # Сохраняем telegram_id в состоянии
-        await state.update_data(telegram_id=telegram_id, username=target_user.get("username") or target_user.get("full_name"))
-        
-        # Переводим в состояние выбора роли
+
+        await state.update_data(
+            telegram_id=telegram_id,
+            username=target_user.get("username") or target_user.get("full_name"),
+        )
+
         await state.set_state(AdminStates.waiting_role_selection)
-        
-        # Создаем клавиатуру выбора роли
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="👶 Junior",
-                    callback_data="role_junior"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👔 Senior",
-                    callback_data="role_senior"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👑 Admin",
-                    callback_data="role_admin"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="❌ Отменить",
-                    callback_data="admin_cancel_role"
-                )
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="👶 Junior", callback_data="role_junior")],
+                [InlineKeyboardButton(text="👔 Senior", callback_data="role_senior")],
+                [InlineKeyboardButton(text="👑 Admin", callback_data="role_admin")],
+                [
+                    InlineKeyboardButton(
+                        text="❌ Отменить", callback_data="admin_cancel_role"
+                    )
+                ],
             ]
-        ])
-        
+        )
+
         current_role = target_user.get("role", "unknown")
         await callback.answer()
         await callback.message.edit_text(
@@ -926,9 +867,9 @@ async def callback_user_selected_for_role(callback: CallbackQuery, state: FSMCon
             f"📱 Telegram ID: {telegram_id}\n"
             f"🎭 Текущая роль: {current_role}\n\n"
             f"Выберите новую роль:",
-            reply_markup=keyboard
+            reply_markup=keyboard,
         )
-        
+
     except Exception as e:
         logger.error(f"Ошибка при выборе пользователя из списка: {e}")
         await callback.answer("Ошибка", show_alert=True)
@@ -942,27 +883,24 @@ async def callback_select_role(callback: CallbackQuery, state: FSMContext):
         if not user or user["role"] != "admin":
             await callback.answer("❌ Нет прав доступа", show_alert=True)
             return
-        
-        # Извлекаем роль из callback_data
+
         role = callback.data.replace("role_", "")
-        
-        # Получаем данные из состояния
+
         data = await state.get_data()
         telegram_id = data.get("telegram_id")
-        
+
         if not telegram_id:
             await callback.answer("❌ Ошибка: Telegram ID не найден", show_alert=True)
             await state.clear()
             return
-        
-        # Обновляем роль
+
         success = await update_user_role(telegram_id, role)
-        
+
         if success:
             role_names = {
                 "junior": "👶 Junior",
                 "senior": "👔 Senior",
-                "admin": "👑 Admin"
+                "admin": "👑 Admin",
             }
             await callback.answer(f"✅ Роль изменена на {role_names.get(role, role)}")
             await callback.message.edit_text(
@@ -971,13 +909,17 @@ async def callback_select_role(callback: CallbackQuery, state: FSMContext):
                 f"📱 Telegram ID: {telegram_id}\n"
                 f"🎭 Новая роль: {role_names.get(role, role)}"
             )
-            logger.info(f"Админ {callback.from_user.id} изменил роль пользователя {telegram_id} на {role}")
+            logger.info(
+                f"Админ {callback.from_user.id} изменил роль пользователя {telegram_id} на {role}"
+            )
         else:
             await callback.answer("❌ Ошибка при изменении роли", show_alert=True)
-            await callback.message.edit_text("❌ Не удалось изменить роль. Пользователь не найден.")
-        
+            await callback.message.edit_text(
+                "❌ Не удалось изменить роль. Пользователь не найден."
+            )
+
         await state.clear()
-        
+
     except Exception as e:
         logger.error(f"Ошибка при выборе роли: {e}")
         await callback.answer("Ошибка", show_alert=True)
@@ -1000,53 +942,45 @@ async def callback_block_user(callback: CallbackQuery, state: FSMContext):
         if not user or user["role"] != "admin":
             await callback.answer("❌ Нет прав доступа", show_alert=True)
             return
-        
+
         await callback.answer()
-        
-        # Переводим в состояние выбора способа поиска
+
         await state.set_state(AdminStates.waiting_user_selection_method)
         await state.update_data(action="block_user")
-        
-        # Создаем клавиатуру выбора способа поиска
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔢 По Telegram ID",
-                    callback_data="select_by_id_block"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👤 По username",
-                    callback_data="select_by_username_block"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📋 Выбрать из списка",
-                    callback_data="select_from_list_block"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад",
-                    callback_data="admin_users"
-                )
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🔢 По Telegram ID", callback_data="select_by_id_block"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="👤 По username", callback_data="select_by_username_block"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="📋 Выбрать из списка",
+                        callback_data="select_from_list_block",
+                    )
+                ],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_users")],
             ]
-        ])
-        
+        )
+
         await callback.message.edit_text(
             "🚫 Блокировка/разблокировка пользователя\n\n"
             "Выберите способ поиска пользователя:",
-            reply_markup=keyboard
+            reply_markup=keyboard,
         )
-        
+
     except Exception as e:
         logger.error(f"Ошибка в callback_block_user: {e}")
         await callback.answer("Ошибка", show_alert=True)
 
 
-# Обработчики выбора способа поиска для блокировки
 @router.callback_query(F.data == "select_by_id_block")
 async def callback_select_by_id_block(callback: CallbackQuery, state: FSMContext):
     """Обработчик выбора поиска по ID для блокировки"""
@@ -1076,58 +1010,56 @@ async def callback_select_from_list_block(callback: CallbackQuery, state: FSMCon
     """Обработчик выбора из списка для блокировки"""
     try:
         await callback.answer()
-        
-        # Получаем список пользователей
+
         users = await get_all_users(limit=50)
-        
+
         if not users:
             await callback.message.edit_text("❌ Пользователи не найдены.")
             return
-        
-        # Создаем клавиатуру со списком пользователей
+
         keyboard_buttons = []
-        for user in users[:20]:  # Ограничиваем 20 пользователями
+        for user in users[:20]:
             username = user.get("username") or user.get("full_name") or "Без имени"
             telegram_id = user.get("telegram_id")
             role = user.get("role", "unknown")
             blocked = "🚫" if user.get("is_blocked") else "✅"
-            
+
             button_text = f"{blocked} {username} ({telegram_id}) - {role}"
             if len(button_text) > 60:
                 button_text = f"{blocked} {username[:20]}... ({telegram_id})"
-            
-            keyboard_buttons.append([
-                InlineKeyboardButton(
-                    text=button_text,
-                    callback_data=f"user_block_{telegram_id}"
-                )
-            ])
-        
-        keyboard_buttons.append([
-            InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_block_user")
-        ])
-        
+
+            keyboard_buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=button_text, callback_data=f"user_block_{telegram_id}"
+                    )
+                ]
+            )
+
+        keyboard_buttons.append(
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_block_user")]
+        )
+
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-        
+
         await callback.message.edit_text(
             f"📋 Выберите пользователя из списка:\n\n"
             f"Всего пользователей: {len(users)}\n"
             f"Показано: {min(20, len(users))}",
-            reply_markup=keyboard
+            reply_markup=keyboard,
         )
-        
+
     except Exception as e:
         logger.error(f"Ошибка при показе списка пользователей: {e}")
         await callback.answer("Ошибка", show_alert=True)
 
 
-@router.message(AdminStates.waiting_telegram_id_for_block, F.text.regexp(r'^\d+$'))
+@router.message(AdminStates.waiting_telegram_id_for_block, F.text.regexp(r"^\d+$"))
 async def process_telegram_id_for_block(message: Message, state: FSMContext):
     """Обработка Telegram ID для блокировки"""
     try:
         telegram_id = int(message.text.strip())
-        
-        # Проверяем, существует ли пользователь
+
         target_user = await get_user_by_telegram_id(telegram_id)
         if not target_user:
             await message.answer(
@@ -1136,21 +1068,17 @@ async def process_telegram_id_for_block(message: Message, state: FSMContext):
             )
             await state.clear()
             return
-        
-        # Нельзя заблокировать другого админа
+
         if target_user["role"] == "admin" and telegram_id != message.from_user.id:
-            await message.answer(
-                "❌ Нельзя заблокировать другого администратора."
-            )
+            await message.answer("❌ Нельзя заблокировать другого администратора.")
             await state.clear()
             return
-        
+
         current_blocked = target_user.get("is_blocked", False)
         new_blocked = not current_blocked
-        
-        # Обновляем статус блокировки
+
         success = await toggle_user_block(telegram_id, new_blocked)
-        
+
         if success:
             status_text = "заблокирован" if new_blocked else "разблокирован"
             emoji = "🚫" if new_blocked else "✅"
@@ -1161,12 +1089,14 @@ async def process_telegram_id_for_block(message: Message, state: FSMContext):
                 f"🎭 Роль: {target_user.get('role')}\n"
                 f"🔒 Статус: {'Заблокирован' if new_blocked else 'Активен'}"
             )
-            logger.info(f"Админ {message.from_user.id} {'заблокировал' if new_blocked else 'разблокировал'} пользователя {telegram_id}")
+            logger.info(
+                f"Админ {message.from_user.id} {'заблокировал' if new_blocked else 'разблокировал'} пользователя {telegram_id}"
+            )
         else:
             await message.answer("❌ Ошибка при изменении статуса блокировки.")
-        
+
         await state.clear()
-        
+
     except ValueError:
         await message.answer("❌ Неверный формат. Введите число (Telegram ID).")
     except Exception as e:
@@ -1188,9 +1118,8 @@ async def process_invalid_telegram_id_for_block(message: Message):
 async def process_username_for_block(message: Message, state: FSMContext):
     """Обработка username для блокировки"""
     try:
-        username = message.text.strip().lstrip('@')
-        
-        # Проверяем, существует ли пользователь
+        username = message.text.strip().lstrip("@")
+
         target_user = await get_user_by_username(username)
         if not target_user:
             await message.answer(
@@ -1199,23 +1128,19 @@ async def process_username_for_block(message: Message, state: FSMContext):
             )
             await state.clear()
             return
-        
+
         telegram_id = target_user.get("telegram_id")
-        
-        # Нельзя заблокировать другого админа
+
         if target_user["role"] == "admin" and telegram_id != message.from_user.id:
-            await message.answer(
-                "❌ Нельзя заблокировать другого администратора."
-            )
+            await message.answer("❌ Нельзя заблокировать другого администратора.")
             await state.clear()
             return
-        
+
         current_blocked = target_user.get("is_blocked", False)
         new_blocked = not current_blocked
-        
-        # Обновляем статус блокировки
+
         success = await toggle_user_block(telegram_id, new_blocked)
-        
+
         if success:
             status_text = "заблокирован" if new_blocked else "разблокирован"
             emoji = "🚫" if new_blocked else "✅"
@@ -1226,12 +1151,14 @@ async def process_username_for_block(message: Message, state: FSMContext):
                 f"🎭 Роль: {target_user.get('role')}\n"
                 f"🔒 Статус: {'Заблокирован' if new_blocked else 'Активен'}"
             )
-            logger.info(f"Админ {message.from_user.id} {'заблокировал' if new_blocked else 'разблокировал'} пользователя {telegram_id}")
+            logger.info(
+                f"Админ {message.from_user.id} {'заблокировал' if new_blocked else 'разблокировал'} пользователя {telegram_id}"
+            )
         else:
             await message.answer("❌ Ошибка при изменении статуса блокировки.")
-        
+
         await state.clear()
-        
+
     except Exception as e:
         logger.error(f"Ошибка при обработке блокировки по username: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
@@ -1246,27 +1173,25 @@ async def callback_user_selected_for_block(callback: CallbackQuery, state: FSMCo
         if not user or user["role"] != "admin":
             await callback.answer("❌ Нет прав доступа", show_alert=True)
             return
-        
-        # Извлекаем telegram_id из callback_data
+
         telegram_id = int(callback.data.replace("user_block_", ""))
-        
-        # Получаем пользователя
+
         target_user = await get_user_by_telegram_id(telegram_id)
         if not target_user:
             await callback.answer("❌ Пользователь не найден", show_alert=True)
             return
-        
-        # Нельзя заблокировать другого админа
+
         if target_user["role"] == "admin" and telegram_id != callback.from_user.id:
-            await callback.answer("❌ Нельзя заблокировать другого администратора", show_alert=True)
+            await callback.answer(
+                "❌ Нельзя заблокировать другого администратора", show_alert=True
+            )
             return
-        
+
         current_blocked = target_user.get("is_blocked", False)
         new_blocked = not current_blocked
-        
-        # Обновляем статус блокировки
+
         success = await toggle_user_block(telegram_id, new_blocked)
-        
+
         if success:
             status_text = "заблокирован" if new_blocked else "разблокирован"
             emoji = "🚫" if new_blocked else "✅"
@@ -1278,12 +1203,14 @@ async def callback_user_selected_for_block(callback: CallbackQuery, state: FSMCo
                 f"🎭 Роль: {target_user.get('role')}\n"
                 f"🔒 Статус: {'Заблокирован' if new_blocked else 'Активен'}"
             )
-            logger.info(f"Админ {callback.from_user.id} {'заблокировал' if new_blocked else 'разблокировал'} пользователя {telegram_id}")
+            logger.info(
+                f"Админ {callback.from_user.id} {'заблокировал' if new_blocked else 'разблокировал'} пользователя {telegram_id}"
+            )
         else:
             await callback.answer("❌ Ошибка при изменении статуса", show_alert=True)
-        
+
         await state.clear()
-        
+
     except Exception as e:
         logger.error(f"Ошибка при выборе пользователя из списка для блокировки: {e}")
         await callback.answer("Ошибка", show_alert=True)
@@ -1297,39 +1224,36 @@ async def callback_admin_back(callback: CallbackQuery, state: FSMContext):
         if not user or user["role"] != "admin":
             await callback.answer("❌ Нет прав доступа", show_alert=True)
             return
-        
+
         await callback.answer()
-        
-        # Очищаем состояние
+
         await state.clear()
-        
-        # Возвращаемся в главную админ-панель
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔄 Обновить знания",
-                    callback_data="admin_update_knowledge"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👥 Управление пользователями",
-                    callback_data="admin_users"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📊 Статистика",
-                    callback_data="admin_stats"
-                ),
-                InlineKeyboardButton(
-                    text="❌ Закрыть",
-                    callback_data="admin_close"
-                )
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🔄 Обновить знания",
+                        callback_data="admin_update_knowledge",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="👥 Управление пользователями", callback_data="admin_users"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="📊 Статистика", callback_data="admin_stats"
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Закрыть", callback_data="admin_close"
+                    ),
+                ],
             ]
-        ])
-        
-        admin_text = """🔐 Админ-панель
+        )
+
+        admin_text = """🔐 Админ-панель (локальная версия)
 
 Доступные действия:
 
@@ -1337,8 +1261,7 @@ async def callback_admin_back(callback: CallbackQuery, state: FSMContext):
 • Удаляет все векторы из Qdrant
 • Парсит загруженный PDF файл
 • Разбивает на главы и статьи
-• Фильтрует статьи < 150 слов (16 глава)
-• Загружает в Qdrant
+• Загружает в Qdrant с локальными embeddings
 
 👥 Управление пользователями
 • Выдача ролей
@@ -1348,10 +1271,9 @@ async def callback_admin_back(callback: CallbackQuery, state: FSMContext):
 • Показывает статистику системы
 
 Выберите действие:"""
-        
+
         await callback.message.edit_text(admin_text, reply_markup=keyboard)
-        
+
     except Exception as e:
         logger.error(f"Ошибка в callback_admin_back: {e}")
         await callback.answer("Ошибка", show_alert=True)
-

@@ -1,29 +1,26 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+import logging
 from contextlib import contextmanager
+
 import config
 from database.models import Base
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
 
-# Создаем движок
+logger = logging.getLogger(__name__)
+
 engine = create_engine(
-    config.DATABASE_URL,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20
+    config.DATABASE_URL, pool_pre_ping=True, pool_size=10, max_overflow=20
 )
 
-# Создаем фабрику сессий
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 def init_db():
-    """Инициализация базы данных - создание таблиц"""
     Base.metadata.create_all(bind=engine)
-    print("✓ База данных инициализирована")
+    logger.info("База данных инициализирована")
 
 
 def get_db() -> Session:
-    """Получить сессию базы данных"""
     db = SessionLocal()
     try:
         yield db
@@ -33,7 +30,6 @@ def get_db() -> Session:
 
 @contextmanager
 def get_db_session():
-    """Контекстный менеджер для работы с БД"""
     db = SessionLocal()
     try:
         yield db
@@ -43,4 +39,3 @@ def get_db_session():
         raise
     finally:
         db.close()
-
