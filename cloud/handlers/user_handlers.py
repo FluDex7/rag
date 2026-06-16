@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime
+from pathlib import Path
 
 import config
 from aiogram import F, Router
@@ -74,18 +75,13 @@ async def cmd_start(message: Message):
         )
 
         # Приветственное сообщение
-        welcome_text = """👋 Добро пожаловать в бота-консультанта по Налоговому кодексу РФ!
+        welcome_text = """👋 Добро пожаловать!
 
-Я помогу вам найти ответы на вопросы по налоговому законодательству, в частности по 16 главе НК РФ.
-
-Просто задайте мне вопрос текстом, и я найду релевантную информацию и дам развернутый ответ.
+Я помогу разобраться в вопросах налогового законодательства РФ — просто напишите свой вопрос, и я найду ответ на основе Налогового кодекса.
 
 Доступные команды:
-/start - начать работу
-/add_qa - добавить Q&A (только для senior и admin)
 /help - справка
-
-Задайте ваш вопрос:"""
+/add_qa - добавить вопрос-ответ в базу знаний (senior, admin)"""
 
         await message.answer(welcome_text)
         logger.info(f"Пользователь {message.from_user.id} запустил бота")
@@ -98,24 +94,19 @@ async def cmd_start(message: Message):
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     """Обработчик команды /help"""
-    help_text = """📚 Справка по боту
+    help_text = """📚 Справка
 
-Я - бот-консультант по Налоговому кодексу РФ. Я могу помочь вам найти ответы на вопросы по налоговому законодательству.
-
-Как использовать:
-1. Просто напишите ваш вопрос текстом
-2. Я найду релевантную информацию в базе знаний
-3. Сгенерирую развернутый ответ на основе НК РФ
+Я консультирую по Налоговому кодексу РФ. Просто напишите вопрос — я найду релевантные статьи и дам развёрнутый ответ.
 
 Команды:
-/start - начать работу
-/add_qa - добавить новый вопрос-ответ в базу знаний (только для senior и admin)
-/help - показать эту справку
+/help - эта справка
+/add_qa - добавить вопрос-ответ в базу знаний (senior, admin)
+/admin - панель управления (admin)
 
 Примеры вопросов:
-• Какие штрафы предусмотрены за нарушение порядка постановки на учет?
-• Что такое налоговое правонарушение?
-• Какая ответственность за неуплату налогов?"""
+• Какие штрафы предусмотрены за неуплату налогов?
+• Что такое налоговая база?
+• Порядок подачи налоговой декларации"""
 
     await message.answer(help_text)
 
@@ -124,11 +115,12 @@ async def cmd_help(message: Message):
 async def cmd_add_qa(message: Message, state: FSMContext):
     """Обработчик команды /add_qa - добавление Q&A"""
     try:
-        user = await get_user_by_telegram_id(message.from_user.id)
-
-        if not user:
-            await message.answer("Сначала используйте команду /start")
-            return
+        user = await get_or_create_user(
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            full_name=message.from_user.full_name
+            or f"{message.from_user.first_name} {message.from_user.last_name or ''}".strip(),
+        )
 
         # Проверяем права (только senior и admin)
         if user["role"] not in ("senior", "admin"):
@@ -174,11 +166,12 @@ async def process_answer(message: Message, state: FSMContext):
             return
 
         # Получаем информацию о пользователе
-        user = await get_user_by_telegram_id(message.from_user.id)
-        if not user:
-            await message.answer("Сначала используйте команду /start")
-            await state.clear()
-            return
+        user = await get_or_create_user(
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            full_name=message.from_user.full_name
+            or f"{message.from_user.first_name} {message.from_user.last_name or ''}".strip(),
+        )
 
         added_by = f"{user.get('username') or user.get('full_name')} (ID: {user.get('telegram_id')})"
 
@@ -217,12 +210,12 @@ async def process_question(message: Message):
             await message.answer("Пожалуйста, задайте вопрос.")
             return
 
-        # Проверяем пользователя
-        user = await get_user_by_telegram_id(message.from_user.id)
-
-        if not user:
-            await message.answer("Сначала используйте команду /start")
-            return
+        user = await get_or_create_user(
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            full_name=message.from_user.full_name
+            or f"{message.from_user.first_name} {message.from_user.last_name or ''}".strip(),
+        )
 
         if user["is_blocked"]:
             await message.answer("❌ Ваш аккаунт заблокирован.")
@@ -283,11 +276,12 @@ async def process_question(message: Message):
 async def cmd_admin(message: Message, state: FSMContext):
     """Обработчик команды /admin - админ-панель"""
     try:
-        user = await get_user_by_telegram_id(message.from_user.id)
-
-        if not user:
-            await message.answer("Сначала используйте команду /start")
-            return
+        user = await get_or_create_user(
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            full_name=message.from_user.full_name
+            or f"{message.from_user.first_name} {message.from_user.last_name or ''}".strip(),
+        )
 
         # Проверяем права (только admin)
         if user["role"] != "admin":
@@ -339,7 +333,7 @@ async def cmd_admin(message: Message, state: FSMContext):
 • Удаляет все векторы из Qdrant
 • Парсит загруженный PDF файл
 • Разбивает на главы и статьи
-• Фильтрует статьи < 150 слов (16 глава)
+• Фильтрует короткие статьи
 • Загружает в Qdrant
 
 📊 Статистика
@@ -387,7 +381,7 @@ async def callback_update_knowledge(callback: CallbackQuery, state: FSMContext):
             "• Удаление всех векторов из Qdrant\n"
             "• Парсинг PDF\n"
             "• Разбивка на главы и статьи\n"
-            "• Фильтрация статей < 150 слов (16 глава)\n"
+            "• Фильтрация коротких статей\n"
             "• Загрузка в Qdrant\n\n"
             "Процесс может занять несколько минут.",
             reply_markup=cancel_keyboard,
@@ -1313,7 +1307,7 @@ async def callback_admin_back(callback: CallbackQuery, state: FSMContext):
 • Удаляет все векторы из Qdrant
 • Парсит загруженный PDF файл
 • Разбивает на главы и статьи
-• Фильтрует статьи < 150 слов (16 глава)
+• Фильтрует короткие статьи
 • Загружает в Qdrant
 
 👥 Управление пользователями

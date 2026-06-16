@@ -248,7 +248,7 @@ def process_pdf_and_upload_to_qdrant(
                 text = article["text"]
                 if len(text) > max_chars:
                     text = text[:max_chars]
-                vector = embedding_model.encode(text).tolist()
+                vector = embedding_model.encode(f"passage: {text}").tolist()
             except Exception as e:
                 logger.error(f"Ошибка создания embedding для статьи {i+1}: {e}")
                 continue

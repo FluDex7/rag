@@ -24,10 +24,11 @@ services:
     ports:
       - "6333:6333"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/readyz || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/6333' 2>/dev/null"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
+      start_period: 10s
 
   bot:
     build: .
@@ -44,6 +45,13 @@ services:
       QDRANT_URL: http://qdrant:6333
     volumes:
       - ./files:/app/files
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.100.0.0/24
 
 volumes:
   postgres_data:

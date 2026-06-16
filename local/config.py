@@ -11,17 +11,17 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN не установлен в переменных окружения!")
 
-LOCAL_EMBEDDING_MODEL = "cointegrated/rubert-tiny2"
-EMBEDDING_DIMENSION = 312
-EMBEDDING_MAX_TOKENS = 2048
-EMBEDDING_DEVICE = "cpu"
+LOCAL_EMBEDDING_MODEL = "intfloat/multilingual-e5-large"
+EMBEDDING_DIMENSION = 1024
+EMBEDDING_MAX_TOKENS = 512
+EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cuda")
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral:7b")
 OLLAMA_TIMEOUT = 600
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
-QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME_LOCAL", "tax_code_local")
+QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "tax_code")
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
 POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))

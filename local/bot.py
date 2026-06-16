@@ -7,6 +7,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from database.async_db import init_db_async
 
 from handlers import user_handlers
+from utils.commands import set_commands
 from utils.logger import setup_logging
 
 # Настраиваем логирование
@@ -38,6 +39,7 @@ async def main():
     # Регистрируем роутеры (локальные обработчики)
     dp.include_router(user_handlers.router)
 
+    await set_commands(bot)
     logger.info("Бот успешно инициализирован")
 
     # Запускаем polling

@@ -21,14 +21,14 @@ class QdrantService:
         self.embedding_dimension = config.EMBEDDING_DIMENSION
         logger.info(f"QdrantService инициализирован, коллекция: {self.collection_name}")
 
-    def _get_embedding(self, text: str) -> List[float]:
+    def _get_embedding(self, text: str, prefix: str = "passage") -> List[float]:
         try:
             max_chars = config.EMBEDDING_MAX_TOKENS * 4
             if len(text) > max_chars:
                 text = text[:max_chars]
                 logger.warning(f"Текст обрезан до {max_chars} символов")
 
-            return self.embedding_model.encode(text).tolist()
+            return self.embedding_model.encode(f"{prefix}: {text}").tolist()
         except Exception as e:
             logger.error(f"Ошибка получения embedding: {e}")
             raise
@@ -38,7 +38,7 @@ class QdrantService:
             limit = config.MAX_SEARCH_RESULTS
 
         try:
-            query_vector = self._get_embedding(query)
+            query_vector = self._get_embedding(query, prefix="query")
 
             response = self.client.query_points(
                 collection_name=self.collection_name, query=query_vector, limit=limit
