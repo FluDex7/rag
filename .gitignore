@@ -13,6 +13,7 @@ logs/
 *.log
 
 # Environment
+*.env
 .env
 .env.local
 
@@ -32,4 +33,8 @@ Thumbs.db
 
 # Qdrant storage
 qdrant_storage/
+
+# MD files
+*.md
+!README.md
 
