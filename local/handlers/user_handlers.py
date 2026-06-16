@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime
+from pathlib import Path
 
 import config
 from aiogram import F, Router
@@ -71,19 +72,13 @@ async def cmd_start(message: Message):
             user_id=user["user_id"], last_activity=datetime.utcnow()
         )
 
-        welcome_text = f"""👋 Добро пожаловать в бота-консультанта по Налоговому кодексу РФ!
-(🏠 ЛОКАЛЬНАЯ ВЕРСИЯ - {config.OLLAMA_MODEL} + {config.LOCAL_EMBEDDING_MODEL})
+        welcome_text = """👋 Добро пожаловать!
 
-Я помогу вам найти ответы на вопросы по налоговому законодательству, в частности по 16 главе НК РФ.
-
-Просто задайте мне вопрос текстом, и я найду релевантную информацию и дам развернутый ответ.
+Я помогу разобраться в вопросах налогового законодательства РФ — просто напишите свой вопрос, и я найду ответ на основе Налогового кодекса.
 
 Доступные команды:
-/start - начать работу
-/add_qa - добавить Q&A (только для senior и admin)
 /help - справка
-
-Задайте ваш вопрос:"""
+/add_qa - добавить вопрос-ответ в базу знаний (senior, admin)"""
 
         await message.answer(welcome_text)
         logger.info(
@@ -98,28 +93,19 @@ async def cmd_start(message: Message):
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     """Обработчик команды /help"""
-    help_text = f"""📚 Справка по боту (локальная версия)
+    help_text = """📚 Справка
 
-Я - бот-консультант по Налоговому кодексу РФ. Я могу помочь вам найти ответы на вопросы по налоговому законодательству.
-
-🤖 Используемые модели:
-• Embeddings: {config.LOCAL_EMBEDDING_MODEL}
-• LLM: {config.OLLAMA_MODEL} через Ollama
-
-Как использовать:
-1. Просто напишите ваш вопрос текстом
-2. Я найду релевантную информацию в базе знаний
-3. Сгенерирую развернутый ответ на основе НК РФ
+Я консультирую по Налоговому кодексу РФ. Просто напишите вопрос — я найду релевантные статьи и дам развёрнутый ответ.
 
 Команды:
-/start - начать работу
-/add_qa - добавить новый вопрос-ответ в базу знаний (только для senior и admin)
-/help - показать эту справку
+/help - эта справка
+/add_qa - добавить вопрос-ответ в базу знаний (senior, admin)
+/admin - панель управления (admin)
 
 Примеры вопросов:
-• Какие штрафы предусмотрены за нарушение порядка постановки на учет?
-• Что такое налоговое правонарушение?
-• Какая ответственность за неуплату налогов?"""
+• Какие штрафы предусмотрены за неуплату налогов?
+• Что такое налоговая база?
+• Порядок подачи налоговой декларации"""
 
     await message.answer(help_text)
 
@@ -128,11 +114,12 @@ async def cmd_help(message: Message):
 async def cmd_add_qa(message: Message, state: FSMContext):
     """Обработчик команды /add_qa - добавление Q&A"""
     try:
-        user = await get_user_by_telegram_id(message.from_user.id)
-
-        if not user:
-            await message.answer("Сначала используйте команду /start")
-            return
+        user = await get_or_create_user(
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            full_name=message.from_user.full_name
+            or f"{message.from_user.first_name} {message.from_user.last_name or ''}".strip(),
+        )
 
         if user["role"] not in ("senior", "admin"):
             await message.answer(
@@ -175,11 +162,12 @@ async def process_qa_answer(message: Message, state: FSMContext):
             await state.clear()
             return
 
-        user = await get_user_by_telegram_id(message.from_user.id)
-        if not user:
-            await message.answer("Сначала используйте команду /start")
-            await state.clear()
-            return
+        user = await get_or_create_user(
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            full_name=message.from_user.full_name
+            or f"{message.from_user.first_name} {message.from_user.last_name or ''}".strip(),
+        )
 
         added_by = f"{user.get('username') or user.get('full_name')} (ID: {user.get('telegram_id')})"
 
@@ -217,11 +205,12 @@ async def process_question(message: Message):
             await message.answer("Пожалуйста, задайте вопрос.")
             return
 
-        user = await get_user_by_telegram_id(message.from_user.id)
-
-        if not user:
-            await message.answer("Сначала используйте команду /start")
-            return
+        user = await get_or_create_user(
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            full_name=message.from_user.full_name
+            or f"{message.from_user.first_name} {message.from_user.last_name or ''}".strip(),
+        )
 
         if user["is_blocked"]:
             await message.answer("❌ Ваш аккаунт заблокирован.")
@@ -282,11 +271,12 @@ async def process_question(message: Message):
 async def cmd_admin(message: Message, state: FSMContext):
     """Обработчик команды /admin - админ-панель"""
     try:
-        user = await get_user_by_telegram_id(message.from_user.id)
-
-        if not user:
-            await message.answer("Сначала используйте команду /start")
-            return
+        user = await get_or_create_user(
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            full_name=message.from_user.full_name
+            or f"{message.from_user.first_name} {message.from_user.last_name or ''}".strip(),
+        )
 
         if user["role"] != "admin":
             await message.answer(
