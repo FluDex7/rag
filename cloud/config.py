@@ -17,7 +17,7 @@ if not OPENAI_API_KEY:
 OPENAI_MODEL = "gpt-4"
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
-QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "tax_code_chapter_16")
+QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "tax_code")
 
 OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIMENSION = 1536
